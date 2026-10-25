@@ -5229,6 +5229,51 @@ mod tests {
     }
 
     #[test]
+    fn mouse_wheel_sizes_and_feathers_the_brush_in_hand_instead_of_zooming() {
+        use crate::state::Zoom;
+        let mut h = demo([1000.0, 700.0]);
+        let t = Duration::from_secs(10);
+        h.request("ui.set", json!({"view": "detail", "leftPanel": false, "filmstrip": false}), t);
+        h.settle(SETTLE);
+        let wheel = |h: &mut Headless, y: f32, modifiers: egui::Modifiers| {
+            h.request("ui.set", json!({"zoom": "fit", "pan": [0.5, 0.5]}), t);
+            h.request("ui.hoverWidget", json!({"id": "canvas:image"}), t);
+            h.app.synthetic.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, y),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers,
+            });
+            for _ in 0..40 {
+                h.step();
+            }
+        };
+        for right in ["masking", "remove"] {
+            h.request("ui.set", json!({"right": right}), t);
+            if right == "masking" {
+                h.app.ui.tool = "brush".into();
+            }
+            h.settle(SETTLE);
+            let size = |h: &Headless| if right == "remove" { h.app.ui.remove_size } else { h.app.ui.brush_size };
+            let feather = |h: &Headless| if right == "remove" { h.app.ui.remove_feather } else { h.app.ui.brush_feather };
+            let (s0, f0) = (size(&h), feather(&h));
+            wheel(&mut h, 1.0, egui::Modifiers::NONE);
+            assert_eq!(h.app.ui.zoom, Zoom::Fit, "{right}: the plain wheel must not zoom");
+            assert!(size(&h) > s0 * 1.05 && size(&h) < s0 * 1.15, "{right}: one notch up grows the brush about 10 %: {s0} -> {}", size(&h));
+            assert_eq!(feather(&h), f0, "{right}: the plain wheel leaves the feather");
+            let s1 = size(&h);
+            wheel(&mut h, -1.0, egui::Modifiers::SHIFT);
+            assert_eq!(h.app.ui.zoom, Zoom::Fit, "{right}: Shift+wheel must not zoom");
+            assert_eq!(size(&h), s1, "{right}: Shift+wheel leaves the size");
+            assert!((feather(&h) - (f0 - 5.0).max(0.0)).abs() < 0.5, "{right}: a notch down feathers 5 less: {f0} -> {}", feather(&h));
+            wheel(&mut h, 1.0, egui::Modifiers::CTRL);
+            assert!(matches!(h.app.ui.zoom, Zoom::Percent(_)), "{right}: Ctrl+wheel still zooms, got {:?}", h.app.ui.zoom);
+            assert_eq!(size(&h), s1, "{right}: Ctrl+wheel leaves the brush");
+        }
+    }
+
+    #[test]
     fn trackpad_navigation_works_in_tools_compare_reference_and_before_after() {
         use crate::state::Zoom;
         let mut h = demo([1000.0, 700.0]);

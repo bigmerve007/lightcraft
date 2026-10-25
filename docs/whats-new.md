@@ -1,5 +1,13 @@
 # What's new in LightCraft
 
+## 2026-10-25
+
+### The mouse wheel sizes the brush
+- With the Masking brush or the Remove tool in hand, turning the mouse wheel over the photo now makes the brush bigger
+  (up) or smaller (down), as in Lightroom, instead of zooming the photo; Shift+wheel softens or hardens its feather.
+  Ctrl+wheel still zooms, a trackpad still pans and pinches, and `[` / `]` still work. With the Remove tool, the selected
+  spot takes the new size once the wheel stops.
+
 ## 2026-10-24
 
 ### Relative-date filters and smart albums follow the clock

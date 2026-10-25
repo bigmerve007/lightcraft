@@ -223,6 +223,68 @@ fn wheel_notches(events: &[egui::Event]) -> f32 {
         .sum()
 }
 
+/// A notched wheel turn (line/page units) in `events` with no modifier or only Shift, the turns that
+/// size or feather the brush in hand: `Some(shift)`, or `None` without one.
+fn brush_wheel_turn(events: &[egui::Event]) -> Option<bool> {
+    events.iter().find_map(|e| match e {
+        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page, delta, modifiers, .. }
+            if (*modifiers == egui::Modifiers::NONE || *modifiers == egui::Modifiers::SHIFT) && delta.length_sq() > 0.0 && delta.is_finite() =>
+        {
+            Some(modifiers.shift)
+        }
+        _ => None,
+    })
+}
+
+/// The brush size and feather after `notches` of wheel (up is positive): the plain wheel sizes the
+/// brush by about ×1.1 a notch, Shift+wheel feathers it by 5 a notch, within `max_size`.
+fn wheel_brush(size: f32, feather: f32, notches: f32, shift: bool, min_size: f32, max_size: f32) -> (f32, f32) {
+    if !notches.is_finite() {
+        return (size, feather);
+    }
+    if shift { (size, (feather + 5.0 * notches).clamp(0.0, 100.0)) } else { ((size * (0.1 * notches).exp()).clamp(min_size, max_size), feather) }
+}
+
+/// As in Lightroom, a notched mouse wheel over the photo sizes the Masking brush or the Remove tool's
+/// brush (Shift+wheel: its feather) instead of zooming; Ctrl+wheel still zooms and trackpads still
+/// pan. egui spreads a notch over a few frames with no wheel event after the first, so a flag follows
+/// the smoothed delta to its end, and the selected spot takes the new size once, when it settles.
+fn brush_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response) -> bool {
+    let remove = app.ui.right == RightPanel::Remove;
+    let id = egui::Id::unique("loupe-wheel-brush");
+    if !remove && !(app.ui.right == RightPanel::Masking && app.ui.tool == "brush") {
+        ui.data_mut(|d| d.remove_temp::<bool>(id));
+        return false;
+    }
+    // (Shift comes with the wheel event: the rest of the notch's frames have none)
+    let turn = if resp.hovered() { ui.input(|i| brush_wheel_turn(&i.events)) } else { None };
+    if let Some(shift) = turn {
+        ui.data_mut(|d| d.insert_temp(id, shift));
+    }
+    let Some(shift) = ui.data(|d| d.get_temp::<bool>(id)) else {
+        return false;
+    };
+    let turned = turn.is_some();
+    let smooth = ui.input(|i| i.smooth_scroll_delta);
+    let points = smooth.x + smooth.y;
+    if !points.is_finite() || (points == 0.0 && !turned) {
+        ui.data_mut(|d| d.remove_temp::<bool>(id));
+        if remove && app.session.active_spot.is_some() {
+            let _ = app.run("spot.update", json!({"size": app.ui.remove_size, "feather": app.ui.remove_feather}));
+        }
+        return false;
+    }
+    ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+    let notches = points / crate::theme::WHEEL_LINE_POINTS;
+    if remove {
+        (app.ui.remove_size, app.ui.remove_feather) = wheel_brush(app.ui.remove_size, app.ui.remove_feather, notches, shift, 0.001, 0.25);
+    } else {
+        (app.ui.brush_size, app.ui.brush_feather) = wheel_brush(app.ui.brush_size, app.ui.brush_feather, notches, shift, 0.002, 0.5);
+    }
+    ui.ctx().request_repaint();
+    true
+}
+
 /// Native pinch (also modifier-wheel zoom) and two-finger scroll, scoped to this image view.
 pub(crate) fn navigate_gesture(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response, area: Rect, img: Rect, native: [usize; 2]) -> bool {
     if !resp.hovered() {
@@ -578,9 +640,10 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let mut img_rect = animated_rect(ui.ctx(), &mut app.ui.zoom_anim, target_rect);
     let in_pane = |pane: Rect, image: Rect| image.translate(pane.center() - main_area.center());
     let mut navigating = false;
+    let brush_wheeling = brush_wheel(app, ui, &resp);
     for &view_area in &areas {
         let view_img = in_pane(view_area, img_rect);
-        if navigate_gesture(app, ui, &resp, view_area, view_img, native) || middle_pan(app, ui, &resp, view_area, view_img) {
+        if (!brush_wheeling && navigate_gesture(app, ui, &resp, view_area, view_img, native)) || middle_pan(app, ui, &resp, view_area, view_img) {
             navigating = true;
             target_rect = fit_rect(main_area, display_aspect, app.ui.zoom, native, ppp, app.ui.pan);
             img_rect = target_rect;
@@ -3427,6 +3490,25 @@ mod wheel_zoom_tests {
         assert_eq!(wheel_notches(&[wheel(egui::MouseWheelUnit::Point, 40.0, m)]), 0.0);
         assert_eq!(wheel_notches(&[wheel(egui::MouseWheelUnit::Line, 1.0, egui::Modifiers::CTRL)]), 0.0);
         assert_eq!(wheel_notches(&[wheel(egui::MouseWheelUnit::Line, f32::NAN, m)]), 0.0);
+    }
+
+    #[test]
+    fn plain_and_shift_notched_wheels_turn_the_brush() {
+        assert_eq!(brush_wheel_turn(&[wheel(egui::MouseWheelUnit::Line, 1.0, egui::Modifiers::NONE)]), Some(false));
+        assert_eq!(brush_wheel_turn(&[wheel(egui::MouseWheelUnit::Line, -1.0, egui::Modifiers::SHIFT)]), Some(true));
+        assert_eq!(brush_wheel_turn(&[wheel(egui::MouseWheelUnit::Line, 1.0, egui::Modifiers::CTRL)]), None);
+        assert_eq!(brush_wheel_turn(&[wheel(egui::MouseWheelUnit::Point, 40.0, egui::Modifiers::NONE)]), None);
+        assert_eq!(brush_wheel_turn(&[wheel(egui::MouseWheelUnit::Line, f32::NAN, egui::Modifiers::NONE)]), None);
+    }
+
+    #[test]
+    fn wheel_brush_sizes_up_feathers_with_shift_and_clamps() {
+        let (s, f) = wheel_brush(0.1, 50.0, 1.0, false, 0.002, 0.5);
+        assert!((s - 0.1 * 0.1f32.exp()).abs() < 1e-6 && f == 50.0);
+        assert_eq!(wheel_brush(0.1, 50.0, -2.0, true, 0.002, 0.5), (0.1, 40.0));
+        assert_eq!(wheel_brush(0.4, 98.0, 100.0, false, 0.002, 0.5).0, 0.5);
+        assert_eq!(wheel_brush(0.4, 98.0, 100.0, true, 0.002, 0.5).1, 100.0);
+        assert_eq!(wheel_brush(0.1, 50.0, f32::NAN, false, 0.002, 0.5), (0.1, 50.0));
     }
 }
 
